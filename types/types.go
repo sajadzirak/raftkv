@@ -1,8 +1,16 @@
 package types
 
-type Term uint
+type Term int
 type Id uint16
-type LogIdx uint64
+type LogIdx int64
+
+type State int
+
+const (
+	Follower State = iota
+	Candidate
+	Leader
+)
 
 type RPCHandler interface {
 	AppendEntries(*AppendEntriesArgs, *AppendEntriesReply)
@@ -10,12 +18,12 @@ type RPCHandler interface {
 }
 
 type AppendEntriesArgs struct {
-	term         Term
-	leaderId     Id
-	prevLogIdx   LogIdx
-	prevLogTerm  Term
-	entries      []any
-	leaderCommit LogIdx
+	Term         Term
+	LeaderId     Id
+	PrevLogIdx   LogIdx
+	PrevLogTerm  Term
+	Entries      []any
+	LeaderCommit LogIdx
 }
 
 type AppendEntriesReply struct {
@@ -24,13 +32,26 @@ type AppendEntriesReply struct {
 }
 
 type RequestVoteArgs struct {
-	term        Term
-	candidateId Id
-	lastLogIdx  LogIdx
-	lastLogTerm Term
+	Term        Term
+	CandidateId Id
+	LastLogIdx  LogIdx
+	LastLogTerm Term
 }
 
 type RequestVoteReply struct {
 	Term        Term
 	VoteGranted bool
+}
+
+func StateToString(state State) string {
+	switch state {
+	case Leader:
+		return "Leader"
+	case Candidate:
+		return "Candidate"
+	case Follower:
+		return "Follower"
+	default:
+		return "Invalid"
+	}
 }

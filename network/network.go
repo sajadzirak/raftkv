@@ -8,12 +8,16 @@ import (
 
 type Network struct {
 	Peers    map[types.Id]types.RPCHandler
+	Isolated map[types.Id]bool
 	NumPeers uint16
 	DropRate uint8
 }
 
-func (n *Network) SendAppendEntries(destination types.Id, args *types.AppendEntriesArgs) chan types.AppendEntriesReply {
+func (n *Network) SendAppendEntries(source types.Id, destination types.Id, args *types.AppendEntriesArgs) chan types.AppendEntriesReply {
 	channel := make(chan types.AppendEntriesReply)
+	if n.Isolated[source] || n.Isolated[destination] {
+		return channel
+	}
 	go func() {
 		if shouldDrop(n.DropRate) {
 			return
@@ -30,8 +34,11 @@ func (n *Network) SendAppendEntries(destination types.Id, args *types.AppendEntr
 	return channel
 }
 
-func (n *Network) SendRequestVote(destination types.Id, args *types.RequestVoteArgs) chan types.RequestVoteReply {
+func (n *Network) SendRequestVote(source types.Id, destination types.Id, args *types.RequestVoteArgs) chan types.RequestVoteReply {
 	channel := make(chan types.RequestVoteReply)
+	if n.Isolated[source] || n.Isolated[destination] {
+		return channel
+	}
 	go func() {
 		if shouldDrop(n.DropRate) {
 			return
@@ -58,7 +65,7 @@ func shouldDrop(rate uint8) bool {
 
 func delay() {
 	min := 10
-	max := 100
+	max := 50
 	num := min + rand.Intn(max-min)
 	time.Sleep(time.Millisecond * time.Duration(num))
 }
