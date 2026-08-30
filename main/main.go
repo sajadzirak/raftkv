@@ -32,6 +32,50 @@ func main() {
 		go r.Run()
 	}
 
+	// electionTest(network, rafts)
+	logReplicationTest(network, rafts)
+}
+
+func logReplicationTest(network *network.Network, rafts []*raft.Raft) {
+	leaderId, leaderTerm, found, safe := waitForLeader(rafts, 2*time.Second)
+	if found && safe {
+		fmt.Println("Leader id: " + strconv.Itoa(int(leaderId)) +
+			", leader Term: " + strconv.Itoa(int(leaderTerm)))
+	}
+
+	isolatedFollower := (leaderId + 1) % types.Id(len(rafts))
+	network.SetIsolated(isolatedFollower, true)
+	leader := rafts[leaderId]
+	for i := range 4 {
+		_, _, isLeader := leader.Start(fmt.Sprintf("cmd-%d", i))
+		if !isLeader {
+			fmt.Println("[Failed] wrong leader")
+		}
+	}
+
+	time.Sleep(1 * time.Second)
+
+	network.SetIsolated(isolatedFollower, false)
+
+	time.Sleep(1 * time.Second)
+
+	leaderLog := leader.GetLog()
+	isolatedLog := rafts[isolatedFollower].GetLog()
+
+	if len(leaderLog) != len(isolatedLog) {
+		fmt.Println("[Failed] log length mismatch")
+		return
+	}
+	for i := range leaderLog {
+		if leaderLog[i].Term != isolatedLog[i].Term || leaderLog[i].Command != isolatedLog[i].Command {
+			fmt.Println("[Failed] leader's log and isolated's log are conflicting!")
+			return
+		}
+	}
+	fmt.Println("[Pass] all the logs replicated correctly!")
+}
+
+func electionTest(network *network.Network, rafts []*raft.Raft) {
 	leaderId, leaderTerm, found, safe := waitForLeader(rafts, 2*time.Second)
 	if found && safe {
 		fmt.Println("Leader id: " + strconv.Itoa(int(leaderId)) +
@@ -41,7 +85,7 @@ func main() {
 	} else if found && !safe {
 		fmt.Println("[Failed] split brain")
 	}
-	isolate(network, leaderId)
+	network.SetIsolated(leaderId, true)
 	time.Sleep(2 * time.Second)
 	isolatedId := leaderId
 	fmt.Println("--- After isolating the leader ---")
@@ -54,7 +98,7 @@ func main() {
 	} else if found && !safe {
 		fmt.Println("[Failed] split brain")
 	}
-	restore(network, isolatedId)
+	network.SetIsolated(isolatedId, false)
 	time.Sleep(2 * time.Second)
 	fmt.Println("--- After restoring the isolated leader ---")
 	leaderId, leaderTerm, found, safe = waitForLeader(rafts, 2*time.Second)
@@ -128,12 +172,4 @@ func waitForLeader(rafts []*raft.Raft, timeout time.Duration) (types.Id, types.T
 		time.Sleep(75 * time.Millisecond)
 	}
 	return 0, 0, false, true
-}
-
-func isolate(network *network.Network, id types.Id) {
-	network.Isolated[id] = true
-}
-
-func restore(network *network.Network, id types.Id) {
-	network.Isolated[id] = false
 }

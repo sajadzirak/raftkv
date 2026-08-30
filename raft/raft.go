@@ -1,35 +1,32 @@
 package raft
 
 import (
+	"fmt"
 	"math/rand"
 	"raftkv/network"
 	"raftkv/types"
+	"sort"
 	"sync"
 	"time"
 )
 
-type LogEntry struct {
-	Term    types.Term
-	command any
-}
-
 type Raft struct {
-	Id                types.Id
-	currentTerm       types.Term
-	votedFor          *types.Id
-	log               []LogEntry
-	commitIdx         types.LogIdx
-	lastApplied       types.LogIdx
-	state             types.State
-	leaderId          *types.Id
-	mutexLock         sync.Mutex
-	lastElectionReset time.Time
-	network           *network.Network
-	peerIds           []types.Id
-	voteCount         uint16
-	nextIdx           []types.LogIdx // only if it is a leader
-	matchIdx          []types.LogIdx // only if it is a leader
-	// electionTimer *time.Timer
+	Id                   types.Id
+	currentTerm          types.Term
+	votedFor             *types.Id
+	log                  []types.LogEntry
+	commitIdx            types.LogIdx
+	lastApplied          types.LogIdx
+	state                types.State
+	leaderId             *types.Id
+	mutexLock            sync.Mutex
+	lastElectionReset    time.Time
+	network              *network.Network
+	peerIds              []types.Id
+	voteCount            uint16
+	nextIdx              map[types.Id]types.LogIdx // only if it is a leader
+	matchIdx             map[types.Id]types.LogIdx // only if it is a leader
+	appendEntriesChannel chan struct{}
 }
 
 func (r *Raft) AppendEntries(args *types.AppendEntriesArgs, reply *types.AppendEntriesReply) {
@@ -47,8 +44,31 @@ func (r *Raft) AppendEntries(args *types.AppendEntriesArgs, reply *types.AppendE
 		r.state = types.Follower
 	}
 	r.lastElectionReset = time.Now()
+	if args.PrevLogIdx >= types.LogIdx(len(r.log)) {
+		reply.Success = false
+	} else if args.PrevLogIdx >= 0 && r.log[args.PrevLogIdx].Term != args.PrevLogTerm {
+		reply.Success = false
+	} else {
+		i := args.PrevLogIdx + 1
+		for ; i < types.LogIdx(len(r.log)) &&
+			i-args.PrevLogIdx-1 < types.LogIdx(len(args.Entries)); i++ {
+			if r.log[i].Term != args.Entries[i-args.PrevLogIdx-1].Term {
+				r.log = r.log[:i]
+				break
+			}
+		}
+		for j := i - args.PrevLogIdx - 1; j < types.LogIdx(len(args.Entries)); j++ {
+			r.log = append(r.log, args.Entries[j])
+		}
+		if args.LeaderCommit > r.commitIdx {
+			r.commitIdx = min(args.LeaderCommit, r.getLastLogIdx())
+			if entries := r.getAppliableEntries(); len(entries) > 0 {
+				fmt.Printf("[node %d] applying entries: %+v\n", r.Id, entries)
+			}
+		}
+		reply.Success = true
+	}
 	reply.Term = r.currentTerm
-	reply.Success = true // just for now
 }
 
 func (r *Raft) RequestVote(args *types.RequestVoteArgs, reply *types.RequestVoteReply) {
@@ -83,15 +103,16 @@ func (r *Raft) init(id types.Id, peerIds []types.Id, network *network.Network) {
 	r.network = network
 	r.currentTerm = 0
 	r.votedFor = nil
-	r.log = make([]LogEntry, 0)
-	r.commitIdx = 0
-	r.lastApplied = 0
+	r.log = make([]types.LogEntry, 0)
+	r.commitIdx = -1
+	r.lastApplied = -1
 	r.state = types.Follower
 	r.leaderId = nil
 	r.mutexLock = sync.Mutex{}
 	r.voteCount = 0
-	r.nextIdx = make([]types.LogIdx, 0)
-	r.matchIdx = make([]types.LogIdx, 0)
+	r.nextIdx = make(map[types.Id]types.LogIdx)
+	r.matchIdx = make(map[types.Id]types.LogIdx)
+	r.appendEntriesChannel = make(chan struct{}, 10)
 }
 
 func NewRaft(id types.Id, peerIds []types.Id, network *network.Network) *Raft {
@@ -159,43 +180,101 @@ func (r *Raft) sendRequestVote(destination types.Id, voteTerm types.Term,
 	}
 }
 
-func (r *Raft) sendAppendEntries(destination types.Id, term types.Term,
-	leaderId types.Id, prevLogIdx types.LogIdx, prevLogTerm types.Term,
-	entries []any, leaderCommit types.LogIdx) {
-	args := &types.AppendEntriesArgs{Term: term, LeaderId: leaderId,
-		PrevLogIdx: prevLogIdx, PrevLogTerm: prevLogTerm, Entries: entries,
-		LeaderCommit: leaderCommit}
-	r.network.SendAppendEntries(r.Id, destination, args)
-	// we don't care for reply right now because it is only a heartbeat
+func (r *Raft) sendAppendEntries(destination types.Id) {
+	args := r.buildAppendEntriesArgs(destination)
+	channel := r.network.SendAppendEntries(r.Id, destination, &args)
+	select {
+	case reply := <-channel:
+		r.mutexLock.Lock()
+		defer r.mutexLock.Unlock()
+		if reply.Term > r.currentTerm {
+			r.state = types.Follower
+			r.currentTerm = reply.Term
+			r.votedFor = nil
+		} else if !reply.Success {
+			if r.nextIdx[destination] > 0 {
+				r.nextIdx[destination] -= 1
+			}
+		} else {
+			r.nextIdx[destination] = max(args.PrevLogIdx+types.LogIdx(len(args.Entries))+1, r.nextIdx[destination])
+			r.matchIdx[destination] = max(args.PrevLogIdx+types.LogIdx(len(args.Entries)), r.matchIdx[destination])
+			if shouldAdvance, newIdx := r.tryAdvanceCommitIndex(); shouldAdvance {
+				r.commitIdx = newIdx
+			}
+		}
+	case <-time.After(200 * time.Millisecond):
+		return
+	}
+}
+
+func (r *Raft) Start(command types.Command) (types.LogIdx, types.Term, bool) {
+	r.mutexLock.Lock()
+	if r.state != types.Leader {
+		r.mutexLock.Unlock()
+		return -1, -1, false
+	} else {
+		currentTerm := r.currentTerm
+		entry := types.LogEntry{Term: currentTerm, Command: command}
+		r.log = append(r.log, entry)
+		select { // use select statement and default for non-blocking send to avoid deadlock
+		case r.appendEntriesChannel <- struct{}{}:
+		default:
+		}
+		lastLogIdx := r.getLastLogIdx()
+		r.mutexLock.Unlock()
+		return lastLogIdx, currentTerm, true
+	}
+}
+
+func (r *Raft) buildAppendEntriesArgs(peer types.Id) types.AppendEntriesArgs {
+	args := types.AppendEntriesArgs{}
+	args.LeaderId = r.Id
+	r.mutexLock.Lock()
+	defer r.mutexLock.Unlock()
+	args.Term = r.currentTerm
+	args.LeaderCommit = r.commitIdx
+	nextIdx := r.nextIdx[peer]
+	args.PrevLogIdx = nextIdx - 1
+	if args.PrevLogIdx >= 0 {
+		args.PrevLogTerm = r.log[args.PrevLogIdx].Term
+	} else {
+		args.PrevLogTerm = -1
+	}
+	entries := make([]types.LogEntry, len(r.log[nextIdx:]))
+	copy(entries, r.log[nextIdx:])
+	args.Entries = entries
+	return args
 }
 
 func (r *Raft) heartBeatRoutine() {
 	for {
-		r.mutexLock.Lock()
-		if r.state == types.Leader {
-			for _, id := range r.peerIds {
-				go r.sendAppendEntries(id, r.currentTerm, r.Id, -1, -1, make([]any, 0), -1) // just for now
-			}
-			r.mutexLock.Unlock()
-		} else {
-			r.mutexLock.Unlock()
-			break
+		select {
+		case <-time.After(50 * time.Millisecond):
+		case <-r.appendEntriesChannel:
 		}
-		// time.Sleep((50 + time.Duration(rand.Intn(50))) * time.Millisecond)
-		time.Sleep(50 * time.Millisecond)
+		r.mutexLock.Lock()
+		if r.state != types.Leader {
+			r.mutexLock.Unlock()
+			return
+		}
+		for _, id := range r.peerIds {
+			go r.sendAppendEntries(id)
+		}
+		if entries := r.getAppliableEntries(); len(entries) > 0 {
+			fmt.Printf("[node %d] applying entries: %+v\n", r.Id, entries)
+		}
+		r.mutexLock.Unlock()
 	}
 }
 
 func (r *Raft) becomeLeader() {
 	lastLogIdx := r.getLastLogIdx()
 	r.state = types.Leader
-	r.nextIdx = make([]types.LogIdx, len(r.peerIds))
-	for i := range r.nextIdx {
-		r.nextIdx[i] = lastLogIdx + 1
+	for _, peerId := range r.peerIds {
+		r.nextIdx[peerId] = lastLogIdx + 1
 	}
-	r.matchIdx = make([]types.LogIdx, len(r.peerIds))
-	for i := range r.matchIdx {
-		r.matchIdx[i] = 0
+	for _, peerId := range r.peerIds {
+		r.matchIdx[peerId] = 0
 	}
 	go r.heartBeatRoutine()
 }
@@ -230,4 +309,45 @@ func (r *Raft) GetState() (types.State, types.Term) {
 	r.mutexLock.Lock()
 	defer r.mutexLock.Unlock()
 	return r.state, r.currentTerm
+}
+
+func (r *Raft) GetLog() []types.LogEntry {
+	r.mutexLock.Lock()
+	defer r.mutexLock.Unlock()
+	return r.log
+}
+
+func (r *Raft) tryAdvanceCommitIndex() (bool, types.LogIdx) {
+	matchIndexes := make([]types.LogIdx, 0, len(r.peerIds)+1)
+	for _, idx := range r.matchIdx {
+		matchIndexes = append(matchIndexes, idx)
+	}
+	matchIndexes = append(matchIndexes, types.LogIdx(len(r.log)-1))
+	sort.Slice(matchIndexes, func(i, j int) bool {
+		return matchIndexes[i] > matchIndexes[j] // Descending order
+	})
+	count := 0
+	commitIdx := matchIndexes[len(matchIndexes)-1]
+	for _, idx := range matchIndexes {
+		commitIdx = idx
+		count += 1
+		if count > (len(r.peerIds)+1)/2 {
+			if commitIdx > r.commitIdx &&
+				r.log[commitIdx].Term == r.currentTerm {
+				return true, commitIdx
+			} else {
+				return false, -1
+			}
+		}
+	}
+	return false, -1
+}
+
+func (r *Raft) getAppliableEntries() []types.LogEntry {
+	if r.commitIdx <= r.lastApplied {
+		return nil
+	}
+	entries := r.log[r.lastApplied+1 : r.commitIdx+1]
+	r.lastApplied = r.commitIdx
+	return entries
 }

@@ -3,8 +3,8 @@ package types
 type Term int
 type Id uint16
 type LogIdx int64
-
 type State int
+type Command any
 
 const (
 	Follower State = iota
@@ -22,7 +22,7 @@ type AppendEntriesArgs struct {
 	LeaderId     Id
 	PrevLogIdx   LogIdx
 	PrevLogTerm  Term
-	Entries      []any
+	Entries      []LogEntry
 	LeaderCommit LogIdx
 }
 
@@ -41,6 +41,11 @@ type RequestVoteArgs struct {
 type RequestVoteReply struct {
 	Term        Term
 	VoteGranted bool
+}
+
+type LogEntry struct {
+	Term    Term
+	Command Command
 }
 
 func StateToString(state State) string {

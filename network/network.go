@@ -3,19 +3,25 @@ package network
 import (
 	"math/rand"
 	"raftkv/types"
+	"sync"
 	"time"
 )
 
 type Network struct {
-	Peers    map[types.Id]types.RPCHandler
-	Isolated map[types.Id]bool
-	NumPeers uint16
-	DropRate uint8
+	Peers     map[types.Id]types.RPCHandler
+	Isolated  map[types.Id]bool
+	NumPeers  uint16
+	DropRate  uint8
+	mutexLock sync.RWMutex
 }
 
 func (n *Network) SendAppendEntries(source types.Id, destination types.Id, args *types.AppendEntriesArgs) chan types.AppendEntriesReply {
 	channel := make(chan types.AppendEntriesReply)
-	if n.Isolated[source] || n.Isolated[destination] {
+	n.mutexLock.Lock()
+	isolatedSource := n.Isolated[source]
+	isolatedDestination := n.Isolated[destination]
+	n.mutexLock.Unlock()
+	if isolatedSource || isolatedDestination {
 		return channel
 	}
 	go func() {
@@ -23,7 +29,9 @@ func (n *Network) SendAppendEntries(source types.Id, destination types.Id, args 
 			return
 		}
 		delay()
+		n.mutexLock.Lock()
 		peer := n.Peers[destination]
+		n.mutexLock.Unlock()
 		if peer == nil {
 			return
 		}
@@ -36,7 +44,11 @@ func (n *Network) SendAppendEntries(source types.Id, destination types.Id, args 
 
 func (n *Network) SendRequestVote(source types.Id, destination types.Id, args *types.RequestVoteArgs) chan types.RequestVoteReply {
 	channel := make(chan types.RequestVoteReply)
-	if n.Isolated[source] || n.Isolated[destination] {
+	n.mutexLock.Lock()
+	isolatedSource := n.Isolated[source]
+	isolatedDestination := n.Isolated[destination]
+	n.mutexLock.Unlock()
+	if isolatedSource || isolatedDestination {
 		return channel
 	}
 	go func() {
@@ -44,7 +56,9 @@ func (n *Network) SendRequestVote(source types.Id, destination types.Id, args *t
 			return
 		}
 		delay()
+		n.mutexLock.Lock()
 		peer := n.Peers[destination]
+		n.mutexLock.Unlock()
 		if peer == nil {
 			return
 		}
@@ -68,4 +82,10 @@ func delay() {
 	max := 50
 	num := min + rand.Intn(max-min)
 	time.Sleep(time.Millisecond * time.Duration(num))
+}
+
+func (n *Network) SetIsolated(id types.Id, isolate bool) {
+	n.mutexLock.Lock()
+	defer n.mutexLock.Unlock()
+	n.Isolated[id] = isolate
 }
