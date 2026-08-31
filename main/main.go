@@ -33,7 +33,70 @@ func main() {
 	}
 
 	// electionTest(network, rafts)
-	logReplicationTest(network, rafts)
+	// logReplicationTest(network, rafts)
+	recoveryTest(network, rafts)
+}
+
+func recoveryTest(network *network.Network, rafts []*raft.Raft) {
+	leaderId, _, _, _ := waitForLeader(rafts, 2*time.Second)
+	leader := rafts[leaderId]
+
+	for i := range 3 {
+		_, _, isLeader := leader.Start(fmt.Sprintf("cmd-%d", i))
+		if !isLeader {
+			fmt.Println("[Failed] wrong leader")
+		}
+	}
+	time.Sleep(1 * time.Second)
+
+	fmt.Println("--- crashing a follower node ---")
+	crashedId := (leaderId + 1) % types.Id(len(rafts))
+	crashed := rafts[crashedId]
+	peerIds := crashed.PeerIds
+	network.SetIsolated(crashedId, true)
+	rafts[crashedId] = raft.NewRaft(crashedId, peerIds, network)
+	recovered := rafts[crashedId]
+	network.RegisterPeer(crashedId, recovered)
+	time.Sleep(1 * time.Second)
+
+	leaderLog := leader.GetLog()
+	recoveredLog := recovered.GetLog()
+	if len(leaderLog) != len(recoveredLog) {
+		fmt.Println("[Failed] log recovered incorrectly")
+		return
+	}
+	for i := range leaderLog {
+		if leaderLog[i].Term != recoveredLog[i].Term ||
+			leaderLog[i].Command != recoveredLog[i].Command {
+			fmt.Println("[Failed] log recovered incorrectly")
+			return
+		}
+	}
+
+	fmt.Println("[Pass] state recovered correctly")
+
+	network.SetIsolated(crashedId, false)
+	recovered.Run()
+	_, _, isLeader := leader.Start(fmt.Sprintf("cmd-%d", 4))
+	if !isLeader {
+		fmt.Println("[Failed] wrong leader")
+	}
+	time.Sleep(1 * time.Second)
+
+	leaderLog = leader.GetLog()
+	recoveredLog = recovered.GetLog()
+	if len(leaderLog) != len(recoveredLog) {
+		fmt.Println("[Failed] rejoining to cluster failed")
+		return
+	}
+	for i := range leaderLog {
+		if leaderLog[i].Term != recoveredLog[i].Term ||
+			leaderLog[i].Command != recoveredLog[i].Command {
+			fmt.Println("[Failed] rejoining to cluster failed")
+			return
+		}
+	}
+	fmt.Println("[Pass] node rejoined the cluster successfuly")
 }
 
 func logReplicationTest(network *network.Network, rafts []*raft.Raft) {

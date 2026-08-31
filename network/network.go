@@ -89,3 +89,9 @@ func (n *Network) SetIsolated(id types.Id, isolate bool) {
 	defer n.mutexLock.Unlock()
 	n.Isolated[id] = isolate
 }
+
+func (n *Network) RegisterPeer(id types.Id, raft types.RPCHandler) {
+	n.mutexLock.Lock()
+	defer n.mutexLock.Unlock()
+	n.Peers[id] = raft
+}

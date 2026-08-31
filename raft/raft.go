@@ -1,8 +1,11 @@
 package raft
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"math/rand"
+	"os"
 	"raftkv/network"
 	"raftkv/types"
 	"sort"
@@ -22,11 +25,17 @@ type Raft struct {
 	mutexLock            sync.Mutex
 	lastElectionReset    time.Time
 	network              *network.Network
-	peerIds              []types.Id
+	PeerIds              []types.Id
 	voteCount            uint16
 	nextIdx              map[types.Id]types.LogIdx // only if it is a leader
 	matchIdx             map[types.Id]types.LogIdx // only if it is a leader
 	appendEntriesChannel chan struct{}
+}
+
+type persistentState struct {
+	CurrentTerm types.Term
+	VotedFor    *types.Id
+	Log         []types.LogEntry
 }
 
 func (r *Raft) AppendEntries(args *types.AppendEntriesArgs, reply *types.AppendEntriesReply) {
@@ -41,6 +50,7 @@ func (r *Raft) AppendEntries(args *types.AppendEntriesArgs, reply *types.AppendE
 	r.leaderId = &args.LeaderId
 	if args.Term >= r.currentTerm {
 		r.currentTerm = args.Term
+		r.persist()
 		r.state = types.Follower
 	}
 	r.lastElectionReset = time.Now()
@@ -60,6 +70,7 @@ func (r *Raft) AppendEntries(args *types.AppendEntriesArgs, reply *types.AppendE
 		for j := i - args.PrevLogIdx - 1; j < types.LogIdx(len(args.Entries)); j++ {
 			r.log = append(r.log, args.Entries[j])
 		}
+		r.persist()
 		if args.LeaderCommit > r.commitIdx {
 			r.commitIdx = min(args.LeaderCommit, r.getLastLogIdx())
 			if entries := r.getAppliableEntries(); len(entries) > 0 {
@@ -95,15 +106,23 @@ func (r *Raft) RequestVote(args *types.RequestVoteArgs, reply *types.RequestVote
 	} else {
 		reply.VoteGranted = false
 	}
+	r.persist()
 }
 
 func (r *Raft) init(id types.Id, peerIds []types.Id, network *network.Network) {
 	r.Id = id
-	r.peerIds = peerIds
+	r.PeerIds = peerIds
 	r.network = network
-	r.currentTerm = 0
-	r.votedFor = nil
-	r.log = make([]types.LogEntry, 0)
+	persistedState := r.loadPersisted()
+	if persistedState != nil {
+		r.currentTerm = persistedState.CurrentTerm
+		r.votedFor = persistedState.VotedFor
+		r.log = persistedState.Log
+	} else {
+		r.currentTerm = 0
+		r.votedFor = nil
+		r.log = make([]types.LogEntry, 0)
+	}
 	r.commitIdx = -1
 	r.lastApplied = -1
 	r.state = types.Follower
@@ -142,12 +161,13 @@ func (r *Raft) electionRoutine() {
 			r.votedFor = nil
 			r.state = types.Candidate
 			r.votedFor = &r.Id
+			r.persist()
 			r.voteCount = 1
 			currentTerm := r.currentTerm
 			lastLogIdx := r.getLastLogIdx()
 			lastLogTerm := r.getLastLogTerm()
 			r.mutexLock.Unlock()
-			for _, id := range r.peerIds {
+			for _, id := range r.PeerIds {
 				go r.sendRequestVote(id, currentTerm, lastLogIdx, lastLogTerm)
 			}
 		}
@@ -167,6 +187,7 @@ func (r *Raft) sendRequestVote(destination types.Id, voteTerm types.Term,
 			r.state = types.Follower
 			r.currentTerm = reply.Term
 			r.votedFor = nil
+			r.persist()
 		} else if reply.VoteGranted {
 			if voteTerm == r.currentTerm {
 				r.voteCount += 1
@@ -191,15 +212,18 @@ func (r *Raft) sendAppendEntries(destination types.Id) {
 			r.state = types.Follower
 			r.currentTerm = reply.Term
 			r.votedFor = nil
+			r.persist()
 		} else if !reply.Success {
 			if r.nextIdx[destination] > 0 {
 				r.nextIdx[destination] -= 1
 			}
 		} else {
-			r.nextIdx[destination] = max(args.PrevLogIdx+types.LogIdx(len(args.Entries))+1, r.nextIdx[destination])
-			r.matchIdx[destination] = max(args.PrevLogIdx+types.LogIdx(len(args.Entries)), r.matchIdx[destination])
-			if shouldAdvance, newIdx := r.tryAdvanceCommitIndex(); shouldAdvance {
-				r.commitIdx = newIdx
+			if len(args.Entries) > 0 {
+				r.nextIdx[destination] = max(args.PrevLogIdx+types.LogIdx(len(args.Entries))+1, r.nextIdx[destination])
+				r.matchIdx[destination] = max(args.PrevLogIdx+types.LogIdx(len(args.Entries)), r.matchIdx[destination])
+				if shouldAdvance, newIdx := r.tryAdvanceCommitIndex(); shouldAdvance {
+					r.commitIdx = newIdx
+				}
 			}
 		}
 	case <-time.After(200 * time.Millisecond):
@@ -216,6 +240,7 @@ func (r *Raft) Start(command types.Command) (types.LogIdx, types.Term, bool) {
 		currentTerm := r.currentTerm
 		entry := types.LogEntry{Term: currentTerm, Command: command}
 		r.log = append(r.log, entry)
+		r.persist()
 		select { // use select statement and default for non-blocking send to avoid deadlock
 		case r.appendEntriesChannel <- struct{}{}:
 		default:
@@ -257,7 +282,7 @@ func (r *Raft) heartBeatRoutine() {
 			r.mutexLock.Unlock()
 			return
 		}
-		for _, id := range r.peerIds {
+		for _, id := range r.PeerIds {
 			go r.sendAppendEntries(id)
 		}
 		if entries := r.getAppliableEntries(); len(entries) > 0 {
@@ -270,17 +295,57 @@ func (r *Raft) heartBeatRoutine() {
 func (r *Raft) becomeLeader() {
 	lastLogIdx := r.getLastLogIdx()
 	r.state = types.Leader
-	for _, peerId := range r.peerIds {
+	for _, peerId := range r.PeerIds {
 		r.nextIdx[peerId] = lastLogIdx + 1
 	}
-	for _, peerId := range r.peerIds {
+	for _, peerId := range r.PeerIds {
 		r.matchIdx[peerId] = 0
 	}
 	go r.heartBeatRoutine()
 }
 
+func (r *Raft) persist() error {
+	logCopy := make([]types.LogEntry, len(r.log))
+	copy(logCopy, r.log)
+	persistentState := persistentState{CurrentTerm: r.currentTerm, VotedFor: r.votedFor, Log: logCopy}
+
+	data, err := json.Marshal(persistentState)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll("states", os.ModePerm); err != nil {
+		return err
+	}
+	err = os.WriteFile(fmt.Sprintf("states/raft-state-%d.json", r.Id), data, 0644)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *Raft) loadPersisted() *persistentState {
+	_, err := os.Stat("states")
+	if err != nil {
+		return nil
+	}
+
+	data, err := os.ReadFile(fmt.Sprintf("states/raft-state-%d.json", r.Id))
+	if err != nil {
+		return nil
+	}
+
+	// Unmarshal JSON to struct
+	var state persistentState
+	err = json.Unmarshal(data, &state)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return &state
+}
+
 func (r *Raft) hasMajority() bool {
-	if r.voteCount > uint16(len(r.peerIds)+1)/2 {
+	if r.voteCount > uint16(len(r.PeerIds)+1)/2 {
 		return true
 	}
 	return false
@@ -318,7 +383,7 @@ func (r *Raft) GetLog() []types.LogEntry {
 }
 
 func (r *Raft) tryAdvanceCommitIndex() (bool, types.LogIdx) {
-	matchIndexes := make([]types.LogIdx, 0, len(r.peerIds)+1)
+	matchIndexes := make([]types.LogIdx, 0, len(r.PeerIds)+1)
 	for _, idx := range r.matchIdx {
 		matchIndexes = append(matchIndexes, idx)
 	}
@@ -331,7 +396,7 @@ func (r *Raft) tryAdvanceCommitIndex() (bool, types.LogIdx) {
 	for _, idx := range matchIndexes {
 		commitIdx = idx
 		count += 1
-		if count > (len(r.peerIds)+1)/2 {
+		if count > (len(r.PeerIds)+1)/2 {
 			if commitIdx > r.commitIdx &&
 				r.log[commitIdx].Term == r.currentTerm {
 				return true, commitIdx
