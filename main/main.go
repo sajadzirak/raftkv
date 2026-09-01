@@ -2,9 +2,11 @@ package main
 
 import (
 	"fmt"
+	"raftkv/kv"
 	"raftkv/network"
 	"raftkv/raft"
 	"raftkv/types"
+	"reflect"
 	"strconv"
 	"time"
 )
@@ -13,6 +15,7 @@ func main() {
 	nodesNum := 7
 	network := new(network.Network)
 	rafts := make([]*raft.Raft, nodesNum)
+	stores := make([]*kv.KVStore, nodesNum)
 	network.Peers = make(map[types.Id]types.RPCHandler)
 	network.Isolated = make(map[types.Id]bool)
 
@@ -23,9 +26,10 @@ func main() {
 				peerIds = append(peerIds, types.Id(j))
 			}
 		}
-		rafts[i] = raft.NewRaft(types.Id(i), peerIds, network)
-		network.Peers[types.Id(i)] = rafts[i]
-		network.Isolated[types.Id(i)] = false
+		stores[i] = kv.NewKVStore()
+		rafts[i] = raft.NewRaft(types.Id(i), peerIds, network, stores[i])
+		network.RegisterPeer(types.Id(i), rafts[i])
+		network.SetIsolated(types.Id(i), false)
 	}
 
 	for _, r := range rafts {
@@ -34,7 +38,50 @@ func main() {
 
 	// electionTest(network, rafts)
 	// logReplicationTest(network, rafts)
-	recoveryTest(network, rafts)
+	// recoveryTest(network, rafts)
+	kvConvergenceTest(network, rafts, stores)
+}
+
+func kvConvergenceTest(network *network.Network, rafts []*raft.Raft, stores []*kv.KVStore) {
+	leaderId, _, found, safe := waitForLeader(rafts, 2*time.Second)
+	if !found {
+		fmt.Println("[Failed] no leader found")
+		return
+	} else if found && !safe {
+		fmt.Println("[Failed] split brain")
+		return
+	}
+	leader := rafts[leaderId]
+	leaderStore := stores[leaderId]
+
+	for i := 0; i < 3; i++ {
+		_, err := leaderStore.Put(leader, fmt.Sprintf("key-%d", i), fmt.Sprintf("val-%d", i))
+		if err != nil {
+			fmt.Println("[Failed] put command on the leader failed")
+		}
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	isolatedId := (leaderId + 1) % types.Id(len(rafts))
+	network.SetIsolated(isolatedId, true)
+
+	leaderStore.Put(leader, "key-3", "val-3")
+	leaderStore.Delete(leader, "key-0")
+	time.Sleep(1 * time.Second)
+
+	network.SetIsolated(isolatedId, false)
+	time.Sleep(1 * time.Second)
+
+	leaderSnapshot := leaderStore.Snapshot()
+	for i := 1; i < len(rafts); i++ {
+		id := (leaderId + types.Id(i)) % types.Id(len(rafts))
+		if !reflect.DeepEqual(leaderSnapshot, stores[id].Snapshot()) {
+			fmt.Println("[Failed] node " + strconv.Itoa(int(id)) + "'s store didn't converge")
+			return
+		}
+	}
+
+	fmt.Println("[Pass] all kv stores converged")
 }
 
 func recoveryTest(network *network.Network, rafts []*raft.Raft) {
@@ -54,7 +101,7 @@ func recoveryTest(network *network.Network, rafts []*raft.Raft) {
 	crashed := rafts[crashedId]
 	peerIds := crashed.PeerIds
 	network.SetIsolated(crashedId, true)
-	rafts[crashedId] = raft.NewRaft(crashedId, peerIds, network)
+	rafts[crashedId] = raft.NewRaft(crashedId, peerIds, network, kv.NewKVStore())
 	recovered := rafts[crashedId]
 	network.RegisterPeer(crashedId, recovered)
 	time.Sleep(1 * time.Second)

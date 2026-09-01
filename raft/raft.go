@@ -30,6 +30,7 @@ type Raft struct {
 	nextIdx              map[types.Id]types.LogIdx // only if it is a leader
 	matchIdx             map[types.Id]types.LogIdx // only if it is a leader
 	appendEntriesChannel chan struct{}
+	applyHandler         types.ApplyHandler
 }
 
 type persistentState struct {
@@ -74,7 +75,10 @@ func (r *Raft) AppendEntries(args *types.AppendEntriesArgs, reply *types.AppendE
 		if args.LeaderCommit > r.commitIdx {
 			r.commitIdx = min(args.LeaderCommit, r.getLastLogIdx())
 			if entries := r.getAppliableEntries(); len(entries) > 0 {
-				fmt.Printf("[node %d] applying entries: %+v\n", r.Id, entries)
+				for _, entry := range entries {
+					r.applyHandler.Apply(entry.Command)
+					r.lastApplied += 1
+				}
 			}
 		}
 		reply.Success = true
@@ -109,7 +113,8 @@ func (r *Raft) RequestVote(args *types.RequestVoteArgs, reply *types.RequestVote
 	r.persist()
 }
 
-func (r *Raft) init(id types.Id, peerIds []types.Id, network *network.Network) {
+func (r *Raft) init(id types.Id, peerIds []types.Id, network *network.Network,
+	applyHandler types.ApplyHandler) {
 	r.Id = id
 	r.PeerIds = peerIds
 	r.network = network
@@ -132,11 +137,13 @@ func (r *Raft) init(id types.Id, peerIds []types.Id, network *network.Network) {
 	r.nextIdx = make(map[types.Id]types.LogIdx)
 	r.matchIdx = make(map[types.Id]types.LogIdx)
 	r.appendEntriesChannel = make(chan struct{}, 10)
+	r.applyHandler = applyHandler
 }
 
-func NewRaft(id types.Id, peerIds []types.Id, network *network.Network) *Raft {
+func NewRaft(id types.Id, peerIds []types.Id, network *network.Network,
+	applyHandler types.ApplyHandler) *Raft {
 	raft := Raft{}
-	raft.init(id, peerIds, network)
+	raft.init(id, peerIds, network, applyHandler)
 	return &raft
 }
 
@@ -286,7 +293,10 @@ func (r *Raft) heartBeatRoutine() {
 			go r.sendAppendEntries(id)
 		}
 		if entries := r.getAppliableEntries(); len(entries) > 0 {
-			fmt.Printf("[node %d] applying entries: %+v\n", r.Id, entries)
+			for _, entry := range entries {
+				r.applyHandler.Apply(entry.Command)
+				r.lastApplied += 1
+			}
 		}
 		r.mutexLock.Unlock()
 	}
@@ -413,6 +423,20 @@ func (r *Raft) getAppliableEntries() []types.LogEntry {
 		return nil
 	}
 	entries := r.log[r.lastApplied+1 : r.commitIdx+1]
-	r.lastApplied = r.commitIdx
 	return entries
+}
+
+func (r *Raft) IsApplied(idx types.LogIdx) bool {
+	r.mutexLock.Lock()
+	defer r.mutexLock.Unlock()
+	return idx <= r.lastApplied
+}
+
+func (r *Raft) GetLogEntryTerm(idx types.LogIdx) (types.Term, bool) {
+	r.mutexLock.Lock()
+	defer r.mutexLock.Unlock()
+	if idx > types.LogIdx(len(r.log)) {
+		return -1, false
+	}
+	return r.log[idx].Term, true
 }

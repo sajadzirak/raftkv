@@ -4,7 +4,6 @@ type Term int
 type Id uint16
 type LogIdx int64
 type State int
-type Command any
 
 const (
 	Follower State = iota
@@ -15,6 +14,10 @@ const (
 type RPCHandler interface {
 	AppendEntries(*AppendEntriesArgs, *AppendEntriesReply)
 	RequestVote(*RequestVoteArgs, *RequestVoteReply)
+}
+
+type ApplyHandler interface {
+	Apply(cmd Command) (string, bool)
 }
 
 type AppendEntriesArgs struct {
@@ -46,6 +49,12 @@ type RequestVoteReply struct {
 type LogEntry struct {
 	Term    Term
 	Command Command
+}
+
+type Command struct {
+	Op    string
+	Key   string
+	Value string
 }
 
 func StateToString(state State) string {
