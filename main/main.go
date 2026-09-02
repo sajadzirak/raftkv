@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"log"
+	"os"
 	"time"
 
 	"raftkv/kv"
@@ -12,6 +14,11 @@ import (
 
 // a small demo
 func main() {
+	// cleaning up previous states
+	if err := os.RemoveAll("states"); err != nil && !os.IsNotExist(err) {
+		log.Fatal(err)
+	}
+
 	const nodesNum = 5
 
 	net := new(network.Network)

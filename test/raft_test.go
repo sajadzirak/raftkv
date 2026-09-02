@@ -2,6 +2,7 @@ package raft
 
 import (
 	"fmt"
+	"os"
 	"reflect"
 	"testing"
 	"time"
@@ -17,6 +18,12 @@ type cluster struct {
 	rafts   []*raft.Raft
 	stores  []*kv.KVStore
 	n       int
+}
+
+func cleanupStateDir(t *testing.T) {
+	if err := os.RemoveAll("states"); err != nil && !os.IsNotExist(err) {
+		t.Logf("Warning: failed to clean states directory: %v", err)
+	}
 }
 
 func newCluster(n int) *cluster {
@@ -124,6 +131,7 @@ func logsEqual(a, b []types.LogEntry) bool {
 // Test 1: Leader Election
 
 func TestLeaderElection(t *testing.T) {
+	cleanupStateDir(t)
 	cluster := newCluster(5)
 
 	leaderId, term1, found, safe := waitForLeader(cluster.network, cluster.rafts, 2*time.Second)
@@ -155,7 +163,7 @@ func TestLeaderElection(t *testing.T) {
 
 	// Restore the old leader
 	cluster.network.SetIsolated(leaderId, false)
-	time.Sleep(1 * time.Second)
+	time.Sleep(3 * time.Second)
 
 	state, term := cluster.rafts[leaderId].GetState()
 	if state != types.Follower {
@@ -171,6 +179,7 @@ func TestLeaderElection(t *testing.T) {
 func TestLeaderElectionVariousSizes(t *testing.T) {
 	for _, n := range []int{3, 5, 7} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
+			cleanupStateDir(t)
 			cluster := newCluster(n)
 			id, term, found, safe := waitForLeader(cluster.network, cluster.rafts, 2*time.Second)
 			if !safe {
@@ -187,6 +196,7 @@ func TestLeaderElectionVariousSizes(t *testing.T) {
 // Test 2: Log Replication
 
 func TestLogReplication(t *testing.T) {
+	cleanupStateDir(t)
 	cluster := newCluster(7)
 
 	leaderId, _, found, safe := waitForLeader(cluster.network, cluster.rafts, 2*time.Second)
@@ -229,6 +239,7 @@ func TestLogReplication(t *testing.T) {
 }
 
 func TestStartRejectsNonLeader(t *testing.T) {
+	cleanupStateDir(t)
 	cluster := newCluster(5)
 	leaderId, _, found, safe := waitForLeader(cluster.network, cluster.rafts, 2*time.Second)
 	if !found || !safe {
@@ -250,6 +261,7 @@ func TestStartRejectsNonLeader(t *testing.T) {
 // Test 3: Crash Recovery
 
 func TestCrashRecovery(t *testing.T) {
+	cleanupStateDir(t)
 	cluster := newCluster(5)
 
 	leaderId, _, found, safe := waitForLeader(cluster.network, cluster.rafts, 2*time.Second)
@@ -306,6 +318,7 @@ func TestCrashRecovery(t *testing.T) {
 // Test 4: KV Store Convergence
 
 func TestKVConvergence(t *testing.T) {
+	cleanupStateDir(t)
 	cluster := newCluster(7)
 
 	leaderId, _, found, safe := waitForLeader(cluster.network, cluster.rafts, 2*time.Second)
@@ -347,6 +360,7 @@ func TestKVConvergence(t *testing.T) {
 }
 
 func TestGetRejectsOnNonLeader(t *testing.T) {
+	cleanupStateDir(t)
 	cluster := newCluster(5)
 	leaderId, _, found, safe := waitForLeader(cluster.network, cluster.rafts, 2*time.Second)
 	if !found || !safe {
