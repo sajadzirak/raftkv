@@ -20,6 +20,15 @@ type cluster struct {
 	n       int
 }
 
+func (c *cluster) Shutdown() {
+	for _, r := range c.rafts {
+		if r != nil {
+			r.Shutdown()
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
 func cleanupStateDir(t *testing.T) {
 	if err := os.RemoveAll("states"); err != nil && !os.IsNotExist(err) {
 		t.Logf("Warning: failed to clean states directory: %v", err)
@@ -133,6 +142,7 @@ func logsEqual(a, b []types.LogEntry) bool {
 func TestLeaderElection(t *testing.T) {
 	cleanupStateDir(t)
 	cluster := newCluster(5)
+	defer cluster.Shutdown()
 
 	leaderId, term1, found, safe := waitForLeader(cluster.network, cluster.rafts, 2*time.Second)
 	if !safe {
@@ -163,7 +173,7 @@ func TestLeaderElection(t *testing.T) {
 
 	// Restore the old leader
 	cluster.network.SetIsolated(leaderId, false)
-	time.Sleep(3 * time.Second)
+	time.Sleep(1 * time.Second)
 
 	state, term := cluster.rafts[leaderId].GetState()
 	if state != types.Follower {
@@ -179,8 +189,8 @@ func TestLeaderElection(t *testing.T) {
 func TestLeaderElectionVariousSizes(t *testing.T) {
 	for _, n := range []int{3, 5, 7} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
-			cleanupStateDir(t)
 			cluster := newCluster(n)
+			defer cluster.Shutdown()
 			id, term, found, safe := waitForLeader(cluster.network, cluster.rafts, 2*time.Second)
 			if !safe {
 				t.Fatalf("split-brain in %d-node cluster (term %d)", n, term)
@@ -198,6 +208,7 @@ func TestLeaderElectionVariousSizes(t *testing.T) {
 func TestLogReplication(t *testing.T) {
 	cleanupStateDir(t)
 	cluster := newCluster(7)
+	defer cluster.Shutdown()
 
 	leaderId, _, found, safe := waitForLeader(cluster.network, cluster.rafts, 2*time.Second)
 	if !found || !safe {
@@ -241,6 +252,7 @@ func TestLogReplication(t *testing.T) {
 func TestStartRejectsNonLeader(t *testing.T) {
 	cleanupStateDir(t)
 	cluster := newCluster(5)
+	defer cluster.Shutdown()
 	leaderId, _, found, safe := waitForLeader(cluster.network, cluster.rafts, 2*time.Second)
 	if !found || !safe {
 		t.Fatalf("failed to establish initial leader")
@@ -263,6 +275,7 @@ func TestStartRejectsNonLeader(t *testing.T) {
 func TestCrashRecovery(t *testing.T) {
 	cleanupStateDir(t)
 	cluster := newCluster(5)
+	defer cluster.Shutdown()
 
 	leaderId, _, found, safe := waitForLeader(cluster.network, cluster.rafts, 2*time.Second)
 	if !found || !safe {
@@ -285,6 +298,9 @@ func TestCrashRecovery(t *testing.T) {
 
 	// Simulate crash by isolating old instance and replacing with a fresh one
 	cluster.network.SetIsolated(crashedId, true)
+	cluster.rafts[crashedId].Shutdown()
+	time.Sleep(200 * time.Millisecond)
+
 	freshStore := kv.NewKVStore()
 	cluster.rafts[crashedId] = raft.NewRaft(crashedId, peerIds, cluster.network, freshStore)
 	cluster.stores[crashedId] = freshStore
@@ -320,6 +336,7 @@ func TestCrashRecovery(t *testing.T) {
 func TestKVConvergence(t *testing.T) {
 	cleanupStateDir(t)
 	cluster := newCluster(7)
+	defer cluster.Shutdown()
 
 	leaderId, _, found, safe := waitForLeader(cluster.network, cluster.rafts, 2*time.Second)
 	if !found || !safe {
@@ -362,6 +379,7 @@ func TestKVConvergence(t *testing.T) {
 func TestGetRejectsOnNonLeader(t *testing.T) {
 	cleanupStateDir(t)
 	cluster := newCluster(5)
+	defer cluster.Shutdown()
 	leaderId, _, found, safe := waitForLeader(cluster.network, cluster.rafts, 2*time.Second)
 	if !found || !safe {
 		t.Fatalf("failed to establish initial leader")

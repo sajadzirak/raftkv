@@ -31,6 +31,7 @@ type Raft struct {
 	matchIdx             map[types.Id]types.LogIdx // only if it is a leader
 	appendEntriesChannel chan struct{}
 	applyHandler         types.ApplyHandler
+	shutdownCh           chan struct{}
 }
 
 type persistentState struct {
@@ -139,6 +140,7 @@ func (r *Raft) init(id types.Id, peerIds []types.Id, network *network.Network,
 	r.matchIdx = make(map[types.Id]types.LogIdx)
 	r.appendEntriesChannel = make(chan struct{}, 10)
 	r.applyHandler = applyHandler
+	r.shutdownCh = make(chan struct{})
 }
 
 func NewRaft(id types.Id, peerIds []types.Id, network *network.Network,
@@ -152,10 +154,24 @@ func (r *Raft) Run() {
 	go r.electionRoutine()
 }
 
+func (r *Raft) Shutdown() {
+	select {
+	case <-r.shutdownCh: // in case we shutdown multiple times
+	default:
+		close(r.shutdownCh)
+	}
+}
+
 func (r *Raft) electionRoutine() {
 	for {
 		sleepStartedAt := time.Now()
-		time.Sleep((150 + time.Duration(rand.Intn(150))) * time.Millisecond)
+
+		select {
+		case <-r.shutdownCh:
+			return
+		case <-time.After((150 + time.Duration(rand.Intn(150))) * time.Millisecond):
+		}
+
 		r.mutexLock.Lock()
 		if sleepStartedAt.Before(r.lastElectionReset) {
 			r.mutexLock.Unlock()
@@ -285,6 +301,8 @@ func (r *Raft) buildAppendEntriesArgs(peer types.Id) types.AppendEntriesArgs {
 func (r *Raft) heartBeatRoutine() {
 	for {
 		select {
+		case <-r.shutdownCh:
+			return
 		case <-time.After(50 * time.Millisecond):
 		case <-r.appendEntriesChannel:
 		}
@@ -346,6 +364,11 @@ func (r *Raft) loadPersisted() *persistentState {
 
 	data, err := os.ReadFile(fmt.Sprintf("states/raft-state-%d.json", r.Id))
 	if err != nil {
+		return nil
+	}
+
+	if len(data) == 0 {
+		log.Printf("Node %d: state file is empty", r.Id)
 		return nil
 	}
 
