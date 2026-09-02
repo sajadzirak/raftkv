@@ -159,6 +159,7 @@ func TestLeaderElection(t *testing.T) {
 
 	state, term := cluster.rafts[leaderId].GetState()
 	if state != types.Follower {
+		fmt.Printf("leader state number: %d\n", types.Leader)
 		t.Fatalf("old leader did not step down after rejoining: state=%v term=%d", state, term)
 	}
 	if term < term2 {
