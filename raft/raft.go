@@ -394,7 +394,9 @@ func (r *Raft) GetState() (types.State, types.Term) {
 func (r *Raft) GetLog() []types.LogEntry {
 	r.mutexLock.Lock()
 	defer r.mutexLock.Unlock()
-	return r.log
+	logCopy := make([]types.LogEntry, len(r.log))
+	copy(logCopy, r.log)
+	return logCopy
 }
 
 func (r *Raft) tryAdvanceCommitIndex() (bool, types.LogIdx) {
@@ -440,7 +442,7 @@ func (r *Raft) IsApplied(idx types.LogIdx) bool {
 func (r *Raft) GetLogEntryTerm(idx types.LogIdx) (types.Term, bool) {
 	r.mutexLock.Lock()
 	defer r.mutexLock.Unlock()
-	if idx > types.LogIdx(len(r.log)) {
+	if idx >= types.LogIdx(len(r.log)) || idx < 0 {
 		return -1, false
 	}
 	return r.log[idx].Term, true
