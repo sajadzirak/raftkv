@@ -20,15 +20,7 @@ verified through deliberate fault-injection testing rather than assumed.
 
 The system is split into three layers, each with a single responsibility:
 
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│   KVStore   │ ◄── │     Raft     │ ◄── │   Network   │
-│ (state      │     │ (consensus:  │     │ (simulated  │
-│  machine)   │     │  election,   │     │  RPC +      │
-│             │     │  replication,│     │  fault      │
-│             │     │  persistence)│     │  injection) │
-└─────────────┘     └──────────────┘     └─────────────┘
-```
+![architecture](./architecture.svg)
 
 - **Network** is a fully in-memory, in-process simulation of an unreliable
   network (see [Design Decisions](#design-decisions)). It knows nothing
@@ -102,18 +94,11 @@ the log) or lease-based reads; out of scope here.
 - **Persistence uses full-file rewrite**, not an append-only log — simpler
   and correct, but O(log size) per write rather than O(1). Fine at test
   scale, not production-scale.
-- **The test harness's simulated "crash"** replaces a node's `Raft`
-  instance reference and its `Network` registration, but does not
-  explicitly halt the original instance's background goroutines (no
-  `Stop()`/lifecycle mechanism was built). In rare timing windows this
-  could allow a "zombie" pre-crash instance to still emit stray RPCs.
-  Noted as a gap rather than fixed, given the time available.
 
 ## Testing
 
 ```bash
-go test -race -v ./...
-go test -race -count=5 ./...   # repeat to catch timing-sensitive flakiness
+go test -v -race -count=5 ./test
 ```
 
 The suite includes:
@@ -127,10 +112,11 @@ The suite includes:
   isolated follower correctly starts empty and converges to the leader's
   exact log after being restored.
 - `TestStartRejectsNonLeader` — client-facing safety check.
-- `TestCrashRecovery` — a node's persisted state survives a simulated
-  crash and process replacement, and the recovered node resumes live
-  participation (not just static state — it picks up new entries
-  committed after its restart).
+- `TestCrashRecovery` — a follower is properly shut down (goroutines 
+  stopped), then a fresh instance loads persisted state from disk and 
+  verifies it matches the leader's log. The recovered node then reconnects 
+  and participates in new replication, demonstrating a full crash-recovery 
+  cycle with proper cleanup
 - `TestKVConvergence` — after a sequence of `Put`/`Delete` operations
   spanning a follower isolation/recovery cycle, every node's independent
   `KVStore` map is byte-for-byte identical.
