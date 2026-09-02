@@ -98,6 +98,7 @@ func (r *Raft) RequestVote(args *types.RequestVoteArgs, reply *types.RequestVote
 		r.currentTerm = args.Term
 		r.state = types.Follower
 		r.votedFor = nil
+		r.voteCount = 0
 	}
 	reply.Term = r.currentTerm
 	candidateUpToDate := args.LastLogTerm > r.getLastLogTerm() ||
@@ -194,8 +195,10 @@ func (r *Raft) sendRequestVote(destination types.Id, voteTerm types.Term,
 			r.state = types.Follower
 			r.currentTerm = reply.Term
 			r.votedFor = nil
+			r.voteCount = 0
 			r.persist()
-		} else if reply.VoteGranted {
+		} else if reply.VoteGranted && voteTerm == r.currentTerm &&
+			r.state == types.Candidate {
 			if voteTerm == r.currentTerm {
 				r.voteCount += 1
 			}
@@ -219,6 +222,7 @@ func (r *Raft) sendAppendEntries(destination types.Id) {
 			r.state = types.Follower
 			r.currentTerm = reply.Term
 			r.votedFor = nil
+			r.voteCount = 0
 			r.persist()
 		} else if !reply.Success {
 			if r.nextIdx[destination] > 0 {
@@ -305,6 +309,7 @@ func (r *Raft) heartBeatRoutine() {
 func (r *Raft) becomeLeader() {
 	lastLogIdx := r.getLastLogIdx()
 	r.state = types.Leader
+	r.voteCount = 0
 	for _, peerId := range r.PeerIds {
 		r.nextIdx[peerId] = lastLogIdx + 1
 	}
