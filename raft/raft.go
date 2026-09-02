@@ -314,7 +314,7 @@ func (r *Raft) becomeLeader() {
 		r.nextIdx[peerId] = lastLogIdx + 1
 	}
 	for _, peerId := range r.PeerIds {
-		r.matchIdx[peerId] = 0
+		r.matchIdx[peerId] = -1
 	}
 	go r.heartBeatRoutine()
 }
@@ -400,6 +400,10 @@ func (r *Raft) GetLog() []types.LogEntry {
 }
 
 func (r *Raft) tryAdvanceCommitIndex() (bool, types.LogIdx) {
+	if len(r.log) == 0 {
+		return false, -1
+	}
+
 	matchIndexes := make([]types.LogIdx, 0, len(r.PeerIds)+1)
 	for _, idx := range r.matchIdx {
 		matchIndexes = append(matchIndexes, idx)
@@ -414,8 +418,8 @@ func (r *Raft) tryAdvanceCommitIndex() (bool, types.LogIdx) {
 		commitIdx = idx
 		count += 1
 		if count > (len(r.PeerIds)+1)/2 {
-			if commitIdx > r.commitIdx &&
-				r.log[commitIdx].Term == r.currentTerm {
+			if commitIdx >= 0 && commitIdx < types.LogIdx(len(r.log)) &&
+				commitIdx > r.commitIdx && r.log[commitIdx].Term == r.currentTerm {
 				return true, commitIdx
 			} else {
 				return false, -1
