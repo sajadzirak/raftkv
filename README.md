@@ -1,8 +1,7 @@
 # RaftKV — A Raft-Based Distributed Key-Value Store
 
 A from-scratch implementation of the Raft consensus algorithm in Go, with a
-replicated key-value store built on top. Built as a graduate-school
-application project to demonstrate practical understanding of distributed
+replicated key-value store built on top. Built to demonstrate practical understanding of distributed
 consensus, concurrent systems design, and fault-tolerant testing — not as a
 port of any existing reference implementation (including MIT 6.5840's
 labs, which cover the same algorithm).
@@ -23,7 +22,7 @@ The system is split into three layers, each with a single responsibility:
 ![architecture](./architecture.svg)
 
 - **Network** is a fully in-memory, in-process simulation of an unreliable
-  network (see [Design Decisions](#design-decisions)). It knows nothing
+  network (see [Design Decisions](#design-decisions-worth-noting)). It knows nothing
   about Raft — its only job is routing calls between peers and, on demand,
   dropping or delaying them.
 - **Raft** implements leader election, log replication, and persistence.
@@ -41,7 +40,7 @@ assumed — it's the thing the test suite verifies.
 ## Features Implemented
 
 - **Leader election** — randomized election timeouts, term-based safety
-  rules, majority-vote quorum, the log up-to-date check from §5.4.1.
+  rules, majority-vote quorum, the log up-to-date check from §5.4.1 section of the paper.
 - **Log replication** — `AppendEntries` with the full consistency check
   (`prevLogIndex`/`prevLogTerm`), conflict detection and truncation,
   `nextIndex`/`matchIndex` tracking with idempotent, monotonic updates
@@ -49,7 +48,7 @@ assumed — it's the thing the test suite verifies.
 - **Commit safety** — the leader only directly commits log entries from
   its *own current term*, with earlier-term entries committed only
   transitively once a current-term entry reaches majority (the Figure 8
-  safety rule — see [Design Decisions](#design-decisions)).
+  safety rule — see [Design Decisions](#design-decisions-worth-noting)).
 - **Persistence** — `currentTerm`, `votedFor`, and the log are durably
   written to disk before a node relies on them being safe (e.g., before
   granting a vote or acknowledging replicated entries), so a crashed node
@@ -62,74 +61,6 @@ assumed — it's the thing the test suite verifies.
   (bidirectional node isolation), simulated crash-and-restart, and
   automated safety/liveness assertions (no split-brain, bounded
   re-election time, log and KV-state convergence after recovery).
-
-## Known Limitations / Scope Decisions
-
-These were deliberate scope cuts made under a real time budget, not
-oversights — each is something I identified, reasoned about, and chose to
-defer rather than rush:
-
-- **No log compaction / snapshotting.** The log grows unboundedly. A real
-  deployment would need `InstallSnapshot` and periodic compaction; this
-  was the first thing cut when time ran short, in favor of getting the
-  core algorithm and testing right.
-- **No Pre-Vote extension.** A node that's long-partitioned keeps
-  incrementing its term while isolated (since nothing stops it from timing
-  out and re-electing itself indefinitely). On rejoining, this inflated
-  term can force an otherwise-healthy leader to step down and trigger an
-  unnecessary re-election — the "disruptive server" problem described in
-  §4.2.3 of the paper. This was found via this project's own fault
-  injection tests, not read about — the Pre-Vote extension (not part of
-  the original paper) is the standard fix, and is noted here as future
-  work rather than implemented.
-- **Reads are not linearizable.** `Get` checks if the node *thinks* it's 
-leader but doesn't verify this with a quorum before reading. A partitioned 
-old leader can continue serving stale reads until it receives a message 
-with a higher term. Real systems use ReadIndex (sending a no-op through 
-the log) or lease-based reads; out of scope here.
-
-- **No cluster membership changes.** Cluster size is fixed at
-  construction; joint consensus for adding/removing nodes was not
-  implemented.
-- **Persistence uses full-file rewrite**, not an append-only log — simpler
-  and correct, but O(log size) per write rather than O(1). Fine at test
-  scale, not production-scale.
-
-## Testing
-
-```bash
-go test -v -race -count=5 ./test
-```
-
-The suite includes:
-
-- `TestLeaderElection` — verifies a single leader is elected, survives
-  leader isolation with a strictly higher term on re-election, and that
-  the original leader correctly steps down to Follower on rejoining.
-- `TestLeaderElectionVariousSizes` — quorum/majority math checked at 3,
-  5, and 7-node cluster sizes.
-- `TestLogReplication` — commands replicate to the reachable majority; an
-  isolated follower correctly starts empty and converges to the leader's
-  exact log after being restored.
-- `TestStartRejectsNonLeader` — client-facing safety check.
-- `TestCrashRecovery` — a follower is properly shut down (goroutines 
-  stopped), then a fresh instance loads persisted state from disk and 
-  verifies it matches the leader's log. The recovered node then reconnects 
-  and participates in new replication, demonstrating a full crash-recovery 
-  cycle with proper cleanup
-- `TestKVConvergence` — after a sequence of `Put`/`Delete` operations
-  spanning a follower isolation/recovery cycle, every node's independent
-  `KVStore` map is byte-for-byte identical.
-- `TestGetRejectsOnNonLeader` — client-facing safety check for reads.
-
-All tests pass consistently under `-race` across repeated runs.
-
-Development itself relied heavily on `go test -race` and `go run -race`:
-several real concurrency bugs were only found this way, including two
-unprotected concurrent map accesses in the network simulation layer (one
-of which was actively causing an intermittent, hard-to-diagnose liveness
-failure — "no leader found" — that looked at first like a Raft-level bug
-but turned out to be corrupted reads in the fault-injection layer itself).
 
 ## Design Decisions Worth Noting
 
@@ -174,6 +105,73 @@ double-count or regress a value that a newer reply already advanced. Both
 fields are instead updated via `max(newValue, currentValue)`, derived
 directly from each reply's own request parameters rather than from
 whatever the field currently holds.
+
+## Testing
+
+```bash
+go test -v -race -count=5 ./test
+```
+
+The suite includes:
+
+- `TestLeaderElection` — verifies a single leader is elected, survives
+  leader isolation with a strictly higher term on re-election, and that
+  the original leader correctly steps down to Follower on rejoining.
+- `TestLeaderElectionVariousSizes` — quorum/majority math checked at 3,
+  5, and 7-node cluster sizes.
+- `TestLogReplication` — commands replicate to the reachable majority; an
+  isolated follower correctly starts empty and converges to the leader's
+  exact log after being restored.
+- `TestStartRejectsNonLeader` — client-facing safety check.
+- `TestCrashRecovery` — a follower is properly shut down (goroutines 
+  stopped), then a fresh instance loads persisted state from disk and 
+  verifies it matches the leader's log. The recovered node then reconnects 
+  and participates in new replication, demonstrating a full crash-recovery 
+  cycle with proper cleanup
+- `TestKVConvergence` — after a sequence of `Put`/`Delete` operations
+  spanning a follower isolation/recovery cycle, every node's independent
+  `KVStore` map is byte-for-byte identical.
+- `TestGetRejectsOnNonLeader` — client-facing safety check for reads.
+
+All tests pass consistently under `-race` across repeated runs.
+
+Development itself relied heavily on `go test -race` and `go run -race`:
+several real concurrency bugs were only found this way, including two
+unprotected concurrent map accesses in the network simulation layer (one
+of which was actively causing an intermittent, hard-to-diagnose liveness
+failure — "no leader found" — that looked at first like a Raft-level bug
+but turned out to be corrupted reads in the fault-injection layer itself).
+
+## Known Limitations / Scope Decisions
+
+These were deliberate scope cuts made under a real time budget, not
+oversights — each is something I identified, reasoned about, and chose to
+defer rather than rush:
+
+- **No log compaction / snapshotting.** The log grows unboundedly. A real
+  deployment would need `InstallSnapshot` and periodic compaction; this
+  was the first thing cut when time ran short, in favor of getting the
+  core algorithm and testing right.
+- **No Pre-Vote extension.** A node that's long-partitioned keeps
+  incrementing its term while isolated (since nothing stops it from timing
+  out and re-electing itself indefinitely). On rejoining, this inflated
+  term can force an otherwise-healthy leader to step down and trigger an
+  unnecessary re-election — the "disruptive server" problem described in
+  §4.2.3 of the paper. This was found via this project's own fault
+  injection tests, not read about — the Pre-Vote extension (not part of
+  the original paper) is the standard fix, and is noted here as future
+  work rather than implemented.
+- **Reads are not linearizable.** `Get` checks if the node *thinks* it's 
+leader but doesn't verify this with a quorum before reading. A partitioned 
+old leader can continue serving stale reads until it receives a message 
+with a higher term. Real systems use ReadIndex (sending a no-op through 
+the log) or lease-based reads; out of scope here.
+
+- **No cluster membership changes.** Cluster size is fixed at
+  construction; joint consensus for adding/removing nodes was not
+  implemented.
+- **Persistence uses full-file rewrite**, not an append-only log — simpler and correct, but O(file size) per persistence operation instead of amortized O(1) append writes. Fine at test
+  scale, not production-scale.
 
 ## How to Run
 
